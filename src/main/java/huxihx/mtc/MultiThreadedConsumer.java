@@ -1,2 +1,4 @@
-package huxihx.mtc;public class MultiThreadedConsumer {
+package huxihx.mtc;
+
+public class MultiThreadedConsumer {
 }
