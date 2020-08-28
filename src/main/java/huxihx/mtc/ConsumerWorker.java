@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class ConsumerWorker<K, V> implements Runnable {
+public class ConsumerWorker<K, V> {
 
     private final List<ConsumerRecord<K, V>> recordsOfSamePartition;
     private volatile boolean started = false;
@@ -24,11 +24,10 @@ public class ConsumerWorker<K, V> implements Runnable {
         this.recordsOfSamePartition = recordsOfSamePartition;
     }
 
-    @Override
-    public void run() {
+    public boolean run() {
         lock.lock();
         if (stopped)
-            return;
+            return false;
         started = true;
         lock.unlock();
         for (ConsumerRecord<K, V> record : recordsOfSamePartition) {
@@ -37,7 +36,7 @@ public class ConsumerWorker<K, V> implements Runnable {
             handleRecord(record);
             latestProcessedOffset.set(record.offset() + 1);
         }
-        future.complete(latestProcessedOffset.get());
+        return future.complete(latestProcessedOffset.get());
     }
 
     public long getLatestProcessedOffset() {
