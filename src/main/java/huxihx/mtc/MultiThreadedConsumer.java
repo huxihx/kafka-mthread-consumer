@@ -52,7 +52,8 @@ public class MultiThreadedConsumer implements Runnable {
     @Override
     public void run() {
         try {
-            consumer.subscribe(Collections.singletonList("test"));
+            consumer.subscribe(Collections.singletonList("test"),
+                    new MultiThreadedRebalanceListener(consumer, outstandingWorkers, offsetsToCommit));
             while (!closed.get()) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
                 distributeRecords(records);
