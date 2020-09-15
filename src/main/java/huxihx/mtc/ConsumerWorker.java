@@ -34,7 +34,8 @@ public class ConsumerWorker<K, V> {
             if (stopped)
                 break;
             handleRecord(record);
-            latestProcessedOffset.set(record.offset() + 1);
+            if (latestProcessedOffset.get() < record.offset() + 1)
+                latestProcessedOffset.set(record.offset() + 1);
         }
         return future.complete(latestProcessedOffset.get());
     }
@@ -45,11 +46,11 @@ public class ConsumerWorker<K, V> {
 
     private void handleRecord(ConsumerRecord<K, V> record) {
         try {
-            Thread.sleep(ThreadLocalRandom.current().nextInt(1000));
+            Thread.sleep(ThreadLocalRandom.current().nextInt(10));
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
         }
-        System.out.println("Finished message processed. Record offset = " + record.offset());
+        System.out.println(Thread.currentThread().getName() + " finished message processed. Record offset = " + record.offset());
     }
 
     public void close() {

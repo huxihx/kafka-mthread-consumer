@@ -7,7 +7,6 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 
 import java.time.Duration;
@@ -21,66 +20,64 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-public class MultiThreadedConsumer implements Runnable {
-
-    private final static Executor executor = Executors
-            .newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 50, r -> {
-                Thread t = new Thread(r);
-                t.setDaemon(true);
-                return t;
-            });
+public class MultiThreadedConsumer {
 
     private final Map<TopicPartition, ConsumerWorker<String, String>> outstandingWorkers = new HashMap<>();
     private final Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
     private long lastCommitTime = System.currentTimeMillis();
     private final Consumer<String, String> consumer;
-    private final AtomicBoolean closed = new AtomicBoolean(false);
     private final int DEFAULT_COMMIT_INTERVAL = 3000;
+    private final Map<TopicPartition, Long> currentConsumedOffsets = new HashMap<>();
+    private final long expectedCount;
 
-    public MultiThreadedConsumer(String groupID) {
+    private final static Executor executor = Executors.newFixedThreadPool(
+            Runtime.getRuntime().availableProcessors() * 10, r -> {
+                Thread t = new Thread(r);
+                t.setDaemon(true);
+                return t;
+            });
+
+    public MultiThreadedConsumer(String brokerId, String topic, String groupID, long expectedCount) {
         Properties props = new Properties();
-        props.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerId);
         props.setProperty(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.setProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupID);
+        props.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Collections.singletonList(topic), new MultiThreadedRebalanceListener(consumer, outstandingWorkers, offsetsToCommit));
+        this.expectedCount = expectedCount;
     }
 
-    @Override
     public void run() {
         try {
-            consumer.subscribe(Collections.singletonList("test"),
-                    new MultiThreadedRebalanceListener(consumer, outstandingWorkers, offsetsToCommit));
-            while (!closed.get()) {
+            while (true) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
                 distributeRecords(records);
                 checkOutstandingWorkers();
                 commitOffsets();
+                if (currentConsumedOffsets.values().stream().mapToLong(Long::longValue).sum() >= expectedCount) {
+                    break;
+                }
             }
-        } catch (WakeupException e) {
-            if (!closed.get())
-                throw e;
         } finally {
             consumer.close();
         }
     }
 
-    public void shudown() {
-        closed.set(true);
-        consumer.wakeup();
-    }
-
+    /**
+     * 对已完成消息处理并提交位移的分区执行resume操作
+     */
     private void checkOutstandingWorkers() {
         Set<TopicPartition> completedPartitions = new HashSet<>();
-
         outstandingWorkers.forEach((tp, worker) -> {
             if (worker.isFinished()) {
                 completedPartitions.add(tp);
             }
             long offset = worker.getLatestProcessedOffset();
+            currentConsumedOffsets.put(tp, offset);
             if (offset > 0L) {
                 offsetsToCommit.put(tp, new OffsetAndMetadata(offset));
             }
@@ -89,6 +86,9 @@ public class MultiThreadedConsumer implements Runnable {
         consumer.resume(completedPartitions);
     }
 
+    /**
+     * 提交位移
+     */
     private void commitOffsets() {
         try {
             long currentTime = System.currentTimeMillis();
@@ -102,6 +102,10 @@ public class MultiThreadedConsumer implements Runnable {
         }
     }
 
+    /**
+     * 将不同分区的消息交由不同的线程，同时暂停该分区消息消费
+     * @param records
+     */
     private void distributeRecords(ConsumerRecords<String, String> records) {
         if (records.isEmpty())
             return;
